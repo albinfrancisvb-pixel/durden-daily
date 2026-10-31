@@ -105,6 +105,28 @@ section.block h2 .count { font-variant-numeric: tabular-nums; }
 .pills button.sel { background: var(--soap); border-color: var(--soap); color: #fff; }
 .wkname { font-family: var(--display); font-size: 24px; text-transform: uppercase; line-height: 1.1; margin-top: 4px; }
 .wklist { display: grid; gap: 6px; }
+.ex { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.ex:has(.item input:checked) { border-color: var(--soap-soft); }
+.exhead { display: flex; align-items: center; gap: 8px; padding-right: 10px; }
+.ex .item { flex: 1; min-width: 0; background: none; border: 0; }
+.logbtn { flex: none; min-height: 36px; font: 600 13px var(--mono); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+.logbtn.has { background: var(--soap); border-color: var(--soap); color: #fff; }
+.logpanel { display: grid; gap: 10px; padding: 2px 12px 12px; }
+.setlist { display: grid; gap: 4px; }
+.setrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
+.setrow button { width: 34px; height: 34px; font: 700 16px var(--mono); color: var(--muted); background: none; border: 0; cursor: pointer; }
+.setform { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.setform label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+.setform input { width: 100%; font: 16px var(--mono); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.setform button { min-height: 40px; font: 600 14px var(--body); color: #fff; background: var(--soap); border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.logbtn:focus-visible, .setrow button:focus-visible, .setform button:focus-visible, .setform input:focus-visible, .lifthist summary:focus-visible { outline: 2px solid var(--soap); outline-offset: 1px; }
+.hist { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.hist div { display: grid; grid-template-columns: 4.2em minmax(0, 1fr); gap: 8px; font-variant-numeric: tabular-nums; }
+.hist div b { font-weight: 500; }
+.lifthist { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.lifthist summary { cursor: pointer; font-weight: 600; }
+.lifthist summary small { display: block; font-weight: 400; color: var(--muted); font-size: 12.5px; }
+.lifthist .hist { margin-top: 8px; }
 .ptop { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .ptotal { font-family: var(--mono); font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ptotal b { font-size: 26px; color: var(--fg); }
@@ -169,6 +191,11 @@ footer { font-size: 13px; color: var(--muted); text-align: center; }
     <div class="pills" id="wkPills" role="group" aria-label="Choose a workout day"></div>
     <div class="wkname" id="wkName"></div>
     <div class="wklist" id="wkList"></div>
+  </section>
+
+  <section class="block" id="lifts">
+    <h2>My lifts <span class="count" id="liftCount"></span></h2>
+    <div class="wklist" id="liftList"></div>
   </section>
 
   <div id="sections"></div>
@@ -333,6 +360,118 @@ const WORKOUTS = [
   ]},
 ];
 const wkView = {};   // date -> workout chosen for that date, if not its own weekday
+const NO_LOG = new Set(["Warm-up", "Handstand practice", "Stretching", "Walk (optional)", "Rest and recover"]);
+const TIMED = new Set(["Plank", "L-sit hold"]);   // reps field holds seconds
+let openLog = null;        // exercise whose log panel is open
+const openHist = new Set();
+const drafts = {};         // "date|exercise" -> { w, r } typed but not yet added
+
+const shortDate = k => fromKey(k).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+
+// past sessions of one exercise, newest first; history is by name, so Mon and Fri lateral raises share it
+function sessionsOf(name) {
+  return Object.keys(days).filter(k => days[k].lifts && days[k].lifts[name]).sort().reverse()
+    .map(k => ({ date: k, sets: days[k].lifts[name] }));
+}
+const setText = (name, s) => TIMED.has(name) ? `${s.w ? s.w + " kg × " : ""}${s.r} s` : `${s.w ? s.w + " kg" : "Bodyweight"} × ${s.r}`;
+// "40 kg × 8, 8, 6 · 45 kg × 5"
+function setsText(name, sets) {
+  const groups = [];
+  for (const s of sets) {
+    const g = groups[groups.length - 1];
+    if (g && g.w === s.w) g.r.push(s.r); else groups.push({ w: s.w, r: [s.r] });
+  }
+  const unit = TIMED.has(name) ? " s" : "";
+  return groups.map(g => `${g.w ? g.w + " kg × " : TIMED.has(name) ? "" : "Bodyweight × "}${g.r.join(", ")}${unit}`).join(" · ");
+}
+const bestSet = sessions => sessions.flatMap(x => x.sets).reduce((b, s) => !b || s.w > b.w || (s.w === b.w && s.r > b.r) ? s : b, null);
+
+function histEl(name, sessions) {
+  const el = document.createElement("div"); el.className = "hist";
+  for (const x of sessions) {
+    const row = document.createElement("div");
+    const d = document.createElement("b"); d.textContent = shortDate(x.date);
+    const t = document.createElement("span"); t.textContent = setsText(name, x.sets);
+    row.append(d, t); el.append(row);
+  }
+  return el;
+}
+
+function logPanel(name) {
+  const panel = document.createElement("div"); panel.className = "logpanel";
+  const today = (days[current] && days[current].lifts && days[current].lifts[name]) || [];
+  const past = sessionsOf(name).filter(x => x.date !== current);
+  if (today.length) {
+    const list = document.createElement("div"); list.className = "setlist";
+    today.forEach((s, i) => {
+      const row = document.createElement("div"); row.className = "setrow";
+      const t = document.createElement("span"); t.textContent = `Set ${i + 1}: ${setText(name, s)}`;
+      const del = document.createElement("button");
+      del.type = "button"; del.textContent = "×"; del.setAttribute("aria-label", `Remove set ${i + 1}`);
+      del.addEventListener("click", () => change(d => {
+        const left = d.lifts[name].filter((_, n) => n !== i);
+        if (left.length) d.lifts[name] = left; else delete d.lifts[name];
+      }));
+      row.append(t, del); list.append(row);
+    });
+    panel.append(list);
+  }
+  // start from the set just done, or the first set of last time
+  const key = current + "|" + name;
+  const seed = today[today.length - 1] || (past[0] && past[0].sets[0]) || {};
+  const draft = drafts[key] || { w: seed.w || "", r: seed.r || "" };
+  const form = document.createElement("form"); form.className = "setform";
+  const field = (text, attrs, value) => {
+    const lab = document.createElement("label"); lab.textContent = text;
+    const inp = document.createElement("input");
+    Object.assign(inp, attrs); inp.value = value;
+    lab.append(inp);
+    return [lab, inp];
+  };
+  const [wLab, wIn] = field("Weight, kg", { type: "number", min: 0, max: 1000, step: "any", inputMode: "decimal", placeholder: "Blank = body" }, draft.w);
+  const [rLab, rIn] = field(TIMED.has(name) ? "Seconds" : "Reps", { type: "number", min: 1, max: 9999, step: 1, inputMode: "numeric", required: true }, draft.r);
+  const keep = () => { drafts[key] = { w: wIn.value, r: rIn.value }; };
+  wIn.addEventListener("input", keep); rIn.addEventListener("input", keep);
+  const add = document.createElement("button"); add.type = "submit"; add.textContent = "Add set";
+  form.append(wLab, rLab, add);
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const w = parseFloat(wIn.value) || 0, r = parseInt(rIn.value, 10);
+    delete drafts[key];
+    change(d => {
+      d.lifts = { ...(d.lifts || {}) };
+      d.lifts[name] = [...(d.lifts[name] || []), { w, r }];
+      d.ticks = { ...(d.ticks || {}), log: true };
+    });
+  });
+  panel.append(form);
+  if (past.length) panel.append(histEl(name, past.slice(0, 3)));
+  return panel;
+}
+
+function renderLifts() {
+  const names = [...new Set(Object.values(days).flatMap(d => Object.keys(d.lifts || {})))];
+  const all = names.map(name => ({ name, sessions: sessionsOf(name) })).sort((a, b) => b.sessions[0].date.localeCompare(a.sessions[0].date));
+  document.getElementById("liftCount").textContent = all.length ? all.length + (all.length === 1 ? " exercise" : " exercises") : "";
+  const list = document.getElementById("liftList");
+  list.replaceChildren();
+  if (!all.length) {
+    const n = document.createElement("div"); n.className = "note";
+    n.textContent = "Nothing logged yet. Tap Log next to an exercise above.";
+    list.append(n);
+  }
+  for (const { name, sessions } of all) {
+    const det = document.createElement("details"); det.className = "lifthist";
+    det.open = openHist.has(name);
+    det.addEventListener("toggle", () => { if (det.open) openHist.add(name); else openHist.delete(name); });
+    const sum = document.createElement("summary"); sum.textContent = name;
+    const s = document.createElement("small");
+    s.textContent = `Best ${setText(name, bestSet(sessions))} · Last ${setsText(name, sessions[0].sets)}, ${shortDate(sessions[0].date)}`;
+    sum.append(s);
+    det.append(sum, histEl(name, sessions));
+    list.append(det);
+  }
+}
 
 function renderWorkout(day) {
   const own = (fromKey(current).getDay() + 6) % 7;
@@ -356,6 +495,8 @@ function renderWorkout(day) {
   w.list.forEach(([name, detail], i) => {
     const id = ids[i];
     const row = document.createElement("label"); row.className = "item";
+    const ex = document.createElement("div"); ex.className = "ex";
+    const head = document.createElement("div"); head.className = "exhead";
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.id = "wk-" + id; cb.checked = !!done[id];
     cb.addEventListener("change", () => change(d => {
@@ -367,7 +508,22 @@ function renderWorkout(day) {
     txt.className = "txt"; txt.textContent = name;
     const s = document.createElement("small"); s.textContent = detail; txt.append(s);
     row.append(cb, txt);
-    list.append(row);
+    head.append(row);
+    ex.append(head);
+    if (!NO_LOG.has(name)) {
+      const prev = sessionsOf(name).find(x => x.date < current);
+      if (prev) { const l = document.createElement("small"); l.textContent = `Last: ${setsText(name, prev.sets)}`; txt.append(l); }
+      const logged = ((day.lifts || {})[name] || []).length;
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "logbtn" + (logged ? " has" : "");
+      btn.textContent = logged ? `${logged} ${logged === 1 ? "set" : "sets"}` : "Log";
+      btn.setAttribute("aria-expanded", openLog === name);
+      btn.setAttribute("aria-label", `Log sets for ${name}`);
+      btn.addEventListener("click", () => { openLog = openLog === name ? null : name; render(); });
+      head.append(btn);
+      if (openLog === name) ex.append(logPanel(name));
+    }
+    list.append(ex);
   });
 }
 
@@ -513,6 +669,7 @@ function render() {
 
   renderChecker(day);
   renderWorkout(day);
+  renderLifts();
 
   const grid = document.getElementById("grid");
   grid.replaceChildren();
